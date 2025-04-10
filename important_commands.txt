@@ -1,0 +1,5 @@
+- Run the script in background:
+nohup ./dp_restoration_batch.sh input/test_SD_HQ/ output/test_SD_HQ 15 2 > log2.txt 2>&1 &
+
+- Scene segmentation (Scene change detection and saving)
+python scene_segmentation_ssim.py input/test_SD_HQ.mp4 input/test_SD_HQ_scenes
