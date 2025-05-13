@@ -3,3 +3,7 @@
 *.npy
 dataset/
 __pycache__/
+*.mp4
+*.avi
+*.mkv
+*.out

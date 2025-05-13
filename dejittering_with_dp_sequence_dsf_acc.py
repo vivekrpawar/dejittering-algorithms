@@ -2,25 +2,15 @@ import numpy as np
 import sys
 import cv2
 import os
-import glob
 import time
-from concurrent.futures import ThreadPoolExecutor
-from numba import njit 
-def compute_intensity(row):
-    """ Grayscale intensity per row (average across channels) """
-    return np.mean(row, axis=1)
+import glob
 
 def color_distance(row1, row2):
     """ Compute Euclidean color distance between two rows (row-wise average) """
     return np.mean(np.linalg.norm(row1.astype(np.float32) - row2.astype(np.float32), axis=1))
 
 def detect_and_repair_flicker_rows(frame, intensity_threshold=30, color_threshold=50):
-    """
-    Detect and repair flicker rows using:
-        1. Intensity consistency check (grayscale)
-        2. Color consistency check (full RGB)
-        3. Edge-aware interpolation for repair (vectorized)
-    """
+    
     H, W, C = frame.shape
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -94,36 +84,31 @@ def detect_and_repair_flicker_rows(frame, intensity_threshold=30, color_threshol
 
     return repaired_frame, actual_flicker_rows.tolist()
 
-@njit
-def compute_intensity_diff(row1, row2, shift1, shift2, max_shift, alpha):
-    W = row1.shape[0] - 2 * max_shift
-    diff = 0.0
-    for i in range(W):
-        a = row1[max_shift + shift1 + i]
-        b = row2[max_shift + shift2 + i]
-        diff += abs(a - b) ** alpha
-    return diff
+def compute_intensity_diff(x, y, s, s_prev, max_shift, alpha):
+    s_max = max(s, s_prev)
+    s_min = min(s, s_prev) 
+    row_length = len(x) - 2 * max_shift
+    x_shifted = x[max_shift-s+s_max:max_shift-s+row_length+s_min]
+    y_shifted = y[max_shift-s_prev+s_max:max_shift-s_prev+row_length+s_min] 
+
+    shifted_length = row_length + s_min - s_max # shifted_length = len(x_shifted) or len(y_shifted)
+    return (np.sum(100 * np.abs(x_shifted-y_shifted)**alpha)) / shifted_length 
 
 def remove_line_jitter(image, max_shift, alpha=2, penalty_lambda=0):
     input_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     H, W = input_frame.shape
-    C = 3  # Assuming BGR input
+    C = 3  
     
-    # Pad frame to handle shifts
     padded_frame = np.zeros((H, W + 2 * max_shift))
     padded_frame[:, max_shift:W + max_shift] = input_frame
     
-    # DP tables: cost[i][s] = minimal cost to align row i with shift s
-    cost = [[float('inf')] * (2 * max_shift + 1) for _ in range(H)]
-    shifts = [[0] * (2 * max_shift + 1) for _ in range(H)]  # Track optimal previous shifts
-    
-    # Initialize first row
-    for s in range(-max_shift, max_shift + 1):
-        cost[0][s + max_shift] = 0  # No cost for first row
+     
+    cost = np.full((H, 2 * max_shift + 1), float('inf'))
+    cost[0] = 0  
+    shifts = np.zeros((H, 2 * max_shift + 1), dtype=int)  
     
     # Dynamic Programming: forward pass
-    for i in range(1, H):
-        # print(f"Processing row {i}/{H-1}", end="\r")
+    for i in range(1, H): 
         for s in range(-max_shift, max_shift + 1):
             for s_prev in range(-max_shift, max_shift + 1):
                 if cost[i-1][s_prev + max_shift] == float('inf'):
@@ -148,7 +133,8 @@ def remove_line_jitter(image, max_shift, alpha=2, penalty_lambda=0):
                     cost[i][s + max_shift] = current_cost
                     shifts[i][s + max_shift] = s_prev   
      
-    corrected_shifts = [0] * H
+    # corrected_shifts = [0] * H
+    corrected_shifts = np.zeros(H, dtype=int)
     s_opt = np.argmin(cost[H-1]) - max_shift
     corrected_shifts[H-1] = s_opt
     
@@ -166,13 +152,6 @@ def remove_line_jitter(image, max_shift, alpha=2, penalty_lambda=0):
     
     return corrected_frame[:, max_shift:W + max_shift, :].astype(np.uint8)
 
-
-def process_single_frame(image_file, max_shift, alpha, _lambda):
-    input_image = cv2.imread(image_file)
-    corrected_image = remove_line_jitter(input_image, max_shift, alpha, _lambda)
-    corrected_image, _ = detect_and_repair_flicker_rows(corrected_image)
-    return corrected_image
-
 def process_frames(input_dir, output_video, max_shift, alpha=0.7, _lambda=0):
     if(not os.path.exists(output_video)):
         os.makedirs(output_video) 
@@ -187,19 +166,25 @@ def process_frames(input_dir, output_video, max_shift, alpha=0.7, _lambda=0):
  
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     out = cv2.VideoWriter(f'{output_video}.mp4', fourcc, 30.0, size) 
+    count = 0
     total_frames = len(image_files)
-    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = [executor.submit(process_single_frame, image_file, max_shift, alpha, _lambda)
-                for image_file in image_files]
-
-        for count, future in enumerate(futures):
-            print(f'Processing frame {count}/{total_frames}', end="\r", flush=True)
-            corrected_image = future.result()
-            cv2.imwrite(f'{output_video}/corrected_{count:06d}.png', corrected_image)
-            out.write(corrected_image)
+    for image_file in image_files:
+        out_msg = f'Processing frame {count}/{total_frames}'
+        print(out_msg, end="\n", flush=True)
+        input_image = cv2.imread(image_file)
+        start_time = time.time()
+        corrected_image = remove_line_jitter(input_image, max_shift, alpha, _lambda)
+        corrected_image, _ = detect_and_repair_flicker_rows(corrected_image)
+        end_time = time.time()
+        print(f'Processing time for frame {count}: {(end_time - start_time) * 1000:.2f} ms')
+        cv2.imwrite(f'{output_video}/corrected_{count:06d}.png', corrected_image)
+        out.write(corrected_image) 
+        count += 1
 
     out.release()
     print(f'Video saved as {output_video}')
+
+
 
 input_dir = sys.argv[1] # Input directory
 output_video = sys.argv[2] # Output filename 

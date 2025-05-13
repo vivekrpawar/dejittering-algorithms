@@ -162,51 +162,52 @@ def remove_line_jitter(image, max_shift, alpha=2, penalty_lambda=0):
 
     return corrected_frame[:, max_shift:W + max_shift, :]
 
-def process_frames(input_dir, output_video, max_shift, alpha=2, _lambda=0):
-    if(not os.path.exists(output_video)):
-        os.makedirs(output_video) 
-    image_files = sorted(glob.glob(os.path.join(input_dir, '*.png')))  
-    if not image_files:
-        print(f"No images found in directory {input_dir}")
-        return
-    print(f'output directory {output_video}') 
-    first_image = cv2.imread(image_files[0])
-    height, width, layers = first_image.shape
-    size = (width, height)
- 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-    out = cv2.VideoWriter(f'{output_video}.mp4', fourcc, 30.0, size) 
-    count = 0
-    total_frames = len(image_files)
-    for image_file in image_files:
-        out_msg = f'Processing frame {count}/{total_frames}'
-        print(out_msg, end="\n", flush=True)
-        input_image = cv2.imread(image_file)
-        start_time = time.time()
-        corrected_image = remove_line_jitter(input_image, max_shift, alpha, _lambda)
-        corrected_image, _ = detect_and_repair_flicker_rows(corrected_image)
-        end_time = time.time()
-        print(f'Processing time for frame {count}: {(end_time - start_time) * 1000:.2f} ms')
-        cv2.imwrite(f'{output_video}/corrected_{count:06d}.png', corrected_image)
-        out.write(corrected_image) 
-        count += 1
 
-    out.release()
-    print(f'Video saved as {output_video}')
+def process_all_sequences(input_root, output_root, max_shift=15, alpha=0.7, _lambda=0):
+    if not os.path.exists(output_root):
+        os.makedirs(output_root)
 
+    for subdir in sorted(os.listdir(input_root)):
+        input_dir = os.path.join(input_root, subdir)
+        if not os.path.isdir(input_dir):
+            continue
 
+        image_files = sorted(glob.glob(os.path.join(input_dir, '*.png')))
+        if not image_files:
+            print(f"[SKIP] No images found in {input_dir}")
+            continue
 
-input_dir = sys.argv[1] # Input directory
-output_video = sys.argv[2] # Output filename 
+        output_dir = os.path.join(output_root, subdir)
+        os.makedirs(output_dir, exist_ok=True)
 
-start_time = time.time()
-process_frames(input_dir, output_video, 15)
-end_time = time.time()
-total_time_in_ms = (end_time - start_time) * 1000
+        print(f'\n[PROCESSING] {input_dir} -> {output_dir}')
+        total_frames = len(image_files)
 
-print(f'Input file directory {input_dir}')
-print(f'Output video directory {output_video}')
-print(f'Processing completed. Output saved to {output_video}.mp4')
+        for count, image_file in enumerate(image_files):
+            print(f'  Frame {count+1}/{total_frames}', end='\r', flush=True)
+            input_image = cv2.imread(image_file)
+
+            start_time = time.time()
+            corrected_image = remove_line_jitter(input_image, max_shift, alpha, _lambda)
+            corrected_image, _ = detect_and_repair_flicker_rows(corrected_image)
+            end_time = time.time()
+
+            out_filename = os.path.join(output_dir, os.path.basename(image_file))
+            cv2.imwrite(out_filename, corrected_image)
+
+            print(f'  Frame {count+1}/{total_frames} done - {(end_time - start_time)*1000:.2f} ms')
+
+        print(f'[DONE] {subdir} processed.\n')
 
 
-print(f'Total time taken: {total_time_in_ms:.2f} ms')
+# --- Entry Point ---
+if __name__ == "__main__":
+    input_root = sys.argv[1]  # Root directory containing subdirectories of frames
+    output_root = sys.argv[2] # Root output directory
+
+    start_time = time.time()
+    process_all_sequences(input_root, output_root, max_shift=15)
+    end_time = time.time()
+
+    print(f'\n[COMPLETED] All sequences processed.')
+    print(f'Total time: {(end_time - start_time):.2f} sec')
